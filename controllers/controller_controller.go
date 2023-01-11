@@ -17,7 +17,9 @@ limitations under the License.
 package controllers
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"time"
 
 	cons "github.com/linkall-labs/vanus-operator/internal/constants"
@@ -76,6 +78,17 @@ func (r *ControllerReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		// Error reading the object - requeue the req.
 		logger.Error(err, "Failed to get Controller.")
 		return ctrl.Result{RequeueAfter: time.Duration(cons.RequeueIntervalInSecond) * time.Second}, err
+	}
+
+	// Create Controller ConfigMap
+	controllerConfigMap := r.generateConfigMapForController(controller)
+	logger.Info("Creating a new Controller ConfigMap.", "ConfigMap.Namespace", controllerConfigMap.Namespace, "ConfigMap.Name", controllerConfigMap.Name)
+	err = r.Create(ctx, controllerConfigMap)
+	if err != nil {
+		logger.Error(err, "Failed to create new Controller ConfigMap", "ConfigMap.Namespace", controllerConfigMap.Namespace, "ConfigMap.Name", controllerConfigMap.Name)
+		return ctrl.Result{}, err
+	} else {
+		logger.Info("Successfully create Controller ConfigMap")
 	}
 
 	controllerStatefulSet := r.getStatefulSetForController(controller)
@@ -296,4 +309,47 @@ func (r *ControllerReconciler) generateSvcForController(controller *vanusv1alpha
 
 	controllerutil.SetControllerReference(controller, controllerSvc, r.Scheme)
 	return controllerSvc
+}
+
+func (r *ControllerReconciler) generateConfigMapForController(controller *vanusv1alpha1.Controller) *corev1.ConfigMap {
+	data := make(map[string]string)
+	value := bytes.Buffer{}
+	value.WriteString("node_id: ${NODE_ID}\n")
+	value.WriteString("name: ${POD_NAME}\n")
+	value.WriteString("ip: ${POD_IP}\n")
+	value.WriteString("port: 2048\n")
+	value.WriteString("etcd:\n")
+	for i := int32(0); i < *controller.Spec.Replicas; i++ {
+		value.WriteString(fmt.Sprintf("  - vanus-controller-%d.vanus-controller:2379\n", i))
+	}
+	value.WriteString("data_dir: /data\n")
+	value.WriteString(fmt.Sprintf("replicas: %d\n", *controller.Spec.Replicas))
+	value.WriteString("metadata:\n")
+	value.WriteString("  key_prefix: /vanus\n")
+	value.WriteString("topology:\n")
+	for i := int32(0); i < *controller.Spec.Replicas; i++ {
+		value.WriteString(fmt.Sprintf("  vanus-controller-%d: vanus-controller-%d.vanus-controller.vanus.svc:2048\n", i, i))
+	}
+	value.WriteString("embed_etcd:\n")
+	value.WriteString("  data_dir: etcd/data\n")
+	value.WriteString("  listen_client_addr: 0.0.0.0:2379\n")
+	value.WriteString("  listen_peer_addr: 0.0.0.0:2380\n")
+	value.WriteString("  advertise_client_addr: ${POD_NAME}.vanus-controller:2379\n")
+	value.WriteString("  advertise_peer_addr: ${POD_NAME}.vanus-controller:2380\n")
+	value.WriteString("  clusters:\n")
+	for i := int32(0); i < *controller.Spec.Replicas; i++ {
+		value.WriteString(fmt.Sprintf("    - vanus-controller-%d=http://vanus-controller-%d.vanus-controller:2380\n", i, i))
+	}
+	data["controller.yaml"] = value.String()
+	controllerConfigMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:  controller.Namespace,
+			Name:       "config-controller",
+			Finalizers: []string{metav1.FinalizerOrphanDependents},
+		},
+		Data: data,
+	}
+
+	controllerutil.SetControllerReference(controller, controllerConfigMap, r.Scheme)
+	return controllerConfigMap
 }

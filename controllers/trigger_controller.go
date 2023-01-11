@@ -17,7 +17,9 @@ limitations under the License.
 package controllers
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"time"
 
 	cons "github.com/linkall-labs/vanus-operator/internal/constants"
@@ -76,6 +78,17 @@ func (r *TriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{RequeueAfter: time.Duration(cons.RequeueIntervalInSecond) * time.Second}, err
 	}
 
+	// Create Trigger ConfigMap
+	triggerConfigMap := r.generateConfigMapForTrigger(trigger)
+	logger.Info("Creating a new Trigger ConfigMap.", "ConfigMap.Namespace", triggerConfigMap.Namespace, "ConfigMap.Name", triggerConfigMap.Name)
+	err = r.Create(ctx, triggerConfigMap)
+	if err != nil {
+		logger.Error(err, "Failed to create new Trigger ConfigMap", "ConfigMap.Namespace", triggerConfigMap.Namespace, "ConfigMap.Name", triggerConfigMap.Name)
+		return ctrl.Result{}, err
+	} else {
+		logger.Info("Successfully create Trigger ConfigMap")
+	}
+
 	triggerDeployment := r.getDeploymentForTrigger(trigger)
 	// Create Trigger Deployment
 	// Check if the Deployment already exists, if not create a new one
@@ -107,6 +120,30 @@ func (r *TriggerReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&vanusv1alpha1.Trigger{}).
 		Complete(r)
+}
+
+func (r *TriggerReconciler) generateConfigMapForTrigger(trigger *vanusv1alpha1.Trigger) *corev1.ConfigMap {
+	data := make(map[string]string)
+	value := bytes.Buffer{}
+	value.WriteString("port: 2148\n")
+	value.WriteString("ip: ${POD_IP}\n")
+	value.WriteString("controllers:\n")
+	// TODO(jiangkai): The timer needs to know the number of replicas of the controller，current default 3 replicas. Suggestted to use the service domain name for forwarding.
+	for i := int32(0); i < 3; i++ {
+		value.WriteString(fmt.Sprintf("  - vanus-controller-%d.vanus-controller.default.svc:2048\n", i))
+	}
+	data["trigger.yaml"] = value.String()
+	triggerConfigMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:  trigger.Namespace,
+			Name:       "config-trigger",
+			Finalizers: []string{metav1.FinalizerOrphanDependents},
+		},
+		Data: data,
+	}
+
+	controllerutil.SetControllerReference(trigger, triggerConfigMap, r.Scheme)
+	return triggerConfigMap
 }
 
 // returns a Trigger Deployment object

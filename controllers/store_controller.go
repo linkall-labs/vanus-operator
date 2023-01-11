@@ -17,7 +17,9 @@ limitations under the License.
 package controllers
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"time"
 
 	cons "github.com/linkall-labs/vanus-operator/internal/constants"
@@ -77,6 +79,17 @@ func (r *StoreReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		return ctrl.Result{RequeueAfter: time.Duration(cons.RequeueIntervalInSecond) * time.Second}, err
 	}
 
+	// Create Store ConfigMap
+	storeConfigMap := r.generateConfigMapForStore(store)
+	logger.Info("Creating a new Store ConfigMap.", "ConfigMap.Namespace", storeConfigMap.Namespace, "ConfigMap.Name", storeConfigMap.Name)
+	err = r.Create(ctx, storeConfigMap)
+	if err != nil {
+		logger.Error(err, "Failed to create new Store ConfigMap", "ConfigMap.Namespace", storeConfigMap.Namespace, "ConfigMap.Name", storeConfigMap.Name)
+		return ctrl.Result{}, err
+	} else {
+		logger.Info("Successfully create Store ConfigMap")
+	}
+
 	storeStatefulSet := r.getStatefulSetForStore(store)
 	// Create Store StatefulSet
 	// Check if the statefulSet already exists, if not create a new one
@@ -108,6 +121,46 @@ func (r *StoreReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&vanusv1alpha1.Store{}).
 		Complete(r)
+}
+
+func (r *StoreReconciler) generateConfigMapForStore(store *vanusv1alpha1.Store) *corev1.ConfigMap {
+	data := make(map[string]string)
+	value := bytes.Buffer{}
+	value.WriteString("port: 11811\n")
+	value.WriteString("ip: ${POD_IP}\n")
+	value.WriteString("controllers:\n")
+	// TODO(jiangkai): The store needs to know the number of replicas of the controller，current default 3 replicas. Suggestted to use the service domain name for forwarding.
+	for i := int32(0); i < 3; i++ {
+		value.WriteString(fmt.Sprintf("  - vanus-controller-%d.vanus-controller:2048\n", i))
+	}
+	value.WriteString("volume:\n")
+	value.WriteString("  id: ${VOLUME_ID}\n")
+	value.WriteString("  dir: /data\n")
+	value.WriteString("  capacity: 1073741824\n")
+	value.WriteString("meta_store:\n")
+	value.WriteString("  wal:\n")
+	value.WriteString("    io:\n")
+	value.WriteString("      engine: psync\n")
+	value.WriteString("offset_store:\n")
+	value.WriteString("  wal:\n")
+	value.WriteString("    io:\n")
+	value.WriteString("      engine: psync\n")
+	value.WriteString("raft:\n")
+	value.WriteString("  wal:\n")
+	value.WriteString("    io:\n")
+	value.WriteString("      engine: psync\n")
+	data["store.yaml"] = value.String()
+	storeConfigMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:  store.Namespace,
+			Name:       "config-store",
+			Finalizers: []string{metav1.FinalizerOrphanDependents},
+		},
+		Data: data,
+	}
+
+	controllerutil.SetControllerReference(store, storeConfigMap, r.Scheme)
+	return storeConfigMap
 }
 
 // returns a Store StatefulSet object

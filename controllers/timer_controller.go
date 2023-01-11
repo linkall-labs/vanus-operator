@@ -17,7 +17,9 @@ limitations under the License.
 package controllers
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"time"
 
 	cons "github.com/linkall-labs/vanus-operator/internal/constants"
@@ -76,6 +78,17 @@ func (r *TimerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		return ctrl.Result{RequeueAfter: time.Duration(cons.RequeueIntervalInSecond) * time.Second}, err
 	}
 
+	// Create Timer ConfigMap
+	timerConfigMap := r.generateConfigMapForTimer(timer)
+	logger.Info("Creating a new Timer ConfigMap.", "ConfigMap.Namespace", timerConfigMap.Namespace, "ConfigMap.Name", timerConfigMap.Name)
+	err = r.Create(ctx, timerConfigMap)
+	if err != nil {
+		logger.Error(err, "Failed to create new Timer ConfigMap", "ConfigMap.Namespace", timerConfigMap.Namespace, "ConfigMap.Name", timerConfigMap.Name)
+		return ctrl.Result{}, err
+	} else {
+		logger.Info("Successfully create Timer ConfigMap")
+	}
+
 	timerDeployment := r.getDeploymentForTimer(timer)
 	// Create Timer Deployment
 	// Check if the Deployment already exists, if not create a new one
@@ -107,6 +120,43 @@ func (r *TimerReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&vanusv1alpha1.Timer{}).
 		Complete(r)
+}
+
+func (r *TimerReconciler) generateConfigMapForTimer(timer *vanusv1alpha1.Timer) *corev1.ConfigMap {
+	data := make(map[string]string)
+	value := bytes.Buffer{}
+	value.WriteString("name: timer\n")
+	value.WriteString("ip: ${POD_IP}\n")
+	value.WriteString("etcd:\n")
+	// TODO(jiangkai): The timer needs to know the number of replicas of the controller，current default 3 replicas. Suggestted to use the service domain name for forwarding.
+	for i := int32(0); i < 3; i++ {
+		value.WriteString(fmt.Sprintf("  - vanus-controller-%d.vanus-controller:2379\n", i))
+	}
+	value.WriteString("controllers:\n")
+	// TODO(jiangkai): The timer needs to know the number of replicas of the controller，current default 3 replicas. Suggestted to use the service domain name for forwarding.
+	for i := int32(0); i < 3; i++ {
+		value.WriteString(fmt.Sprintf("  - vanus-controller-%d.vanus-controller.default.svc:2048\n", i))
+	}
+	value.WriteString("metadata:\n")
+	value.WriteString("  key_prefix: /vanus\n")
+	value.WriteString("leaderelection:\n")
+	value.WriteString("  lease_duration: 15\n")
+	value.WriteString("timingwheel:\n")
+	value.WriteString("  tick: 1\n")
+	value.WriteString("  wheel_size: 32\n")
+	value.WriteString("  layers: 4\n")
+	data["timer.yaml"] = value.String()
+	timerConfigMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:  timer.Namespace,
+			Name:       "config-timer",
+			Finalizers: []string{metav1.FinalizerOrphanDependents},
+		},
+		Data: data,
+	}
+
+	controllerutil.SetControllerReference(timer, timerConfigMap, r.Scheme)
+	return timerConfigMap
 }
 
 // returns a Timer Deployment object
